@@ -48,100 +48,6 @@ public class APICallServiceImpl implements APICallService {
     public int maxResponseMemorySize;
 
     @Override
-    public Mono makeExternalUploadApiCall(Flux<FilePart> files, ExternalApiIntegrationDTO externalApiIntegrationDTO, String fileKeys) {
-        log.info("APICallServiceImpl::makeExternalUploadApiCall");
-        Flux<String> fileKeysFlux = Flux.fromArray(fileKeys.split(","));
-
-        WebClient client = WebClient.builder()
-                .exchangeStrategies(ExchangeStrategies.builder()
-                        .codecs(configurer -> configurer.defaultCodecs()
-                                .maxInMemorySize(maxResponseMemorySize))
-                        .build())
-                .build();
-
-        HttpMethod httpMethod = HttpMethod.valueOf(externalApiIntegrationDTO.getRequestMethod().toString());
-        String url = externalApiIntegrationDTO.getUrl();
-        log.info("makeExternalUploadApiCall External API url {}", url);
-        MultiValueMap<String, String> headers = convertToMultiValueMap(externalApiIntegrationDTO.getRequestHeader());
-        log.info("makeExternalUploadApiCall External API headers {}", headers);
-        Mono<ResponseDTO> responseMono = null;
-
-        if (httpMethod == HttpMethod.POST || httpMethod == HttpMethod.PUT) {
-            MultipartBodyBuilder updatedBuilder = processFilesAndSendRequest(files, fileKeysFlux, externalApiIntegrationDTO);
-            log.info("APICallServiceImpl::makeExternalUploadApiCall, builder value {}", updatedBuilder.build());
-            responseMono = client.method(httpMethod)
-                    .uri(url)
-                    .headers(httpHeaders -> httpHeaders.addAll(headers))
-                    .body(BodyInserters.fromMultipartData(updatedBuilder.build()))
-                    .retrieve()
-                    .bodyToMono(JsonNode.class)
-                    .map(jsonNode -> {
-                        ResponseDTO responseDTO = new ResponseDTO();
-                        responseDTO.setResponseData(jsonNode);
-                        log.info("makeExternalUploadApiCall External API responseDTO {}", responseDTO.getResponseData());
-                        return responseDTO;
-                    });
-
-            updatedBuilder = new MultipartBodyBuilder();
-        }
-        return responseMono
-                .doOnSuccess(responseDTO -> {
-                    // Process the response body asynchronously
-
-                    String token = tokenGeneratorUtil.generateRedisJwtTokenKeyForFile(files, externalApiIntegrationDTO.getRequestBody()
-                            , externalApiIntegrationDTO.getUrl()
-                            , externalApiIntegrationDTO.getOperationType().name());
-                    log.info("makeExternalUploadApiCall token: " + token);
-                    saveToRedis(externalApiIntegrationDTO, token, responseDTO);
-                    log.info("makeExternalUploadApiCall successfully got response: " + responseDTO);
-                })
-                .doOnError(error -> {
-                    // Handle any error that occurred during the request
-                    log.error("error occurred while calling external API: " + url);
-
-                    String httpStatusCode = null;
-                    String updatedError = error.toString();
-                    if (error instanceof WebClientResponseException) {
-                        httpStatusCode = String.valueOf(((WebClientResponseException) error).getRawStatusCode());
-                        updatedError = ((WebClientResponseException) error).getResponseBodyAsString();
-                    }
-                    throw new CustomException("EXTERNAL_SERVICE_CALL_ERROR", updatedError, httpStatusCode);
-                });
-    }
-
-    private MultipartBodyBuilder processFilesAndSendRequest(Flux<FilePart> files, Flux<String> fileKeys, ExternalApiIntegrationDTO integrationDTO) {
-        MultipartBodyBuilder bodyBuilder = new MultipartBodyBuilder();
-        if (integrationDTO.getRequestBody() != null) {
-            JsonNode jsonNode = objectMapper.valueToTree(integrationDTO.getRequestBody());
-
-            // Iterate over the JSON fields and add them to the bodyBuilder
-            Iterator<Map.Entry<String, JsonNode>> fields = jsonNode.fields();
-            while (fields.hasNext()) {
-                Map.Entry<String, JsonNode> field = fields.next();
-                String fieldName = field.getKey();
-                String fieldValue = field.getValue().asText();
-
-                // Add the field as a form field in the bodyBuilder
-                bodyBuilder.part(fieldName, fieldValue);
-            }
-        }
-        Flux<Tuple2<FilePart, String>> filePartsWithKeys = Flux.zip(files, fileKeys);
-        // Process each pair (FilePart, key)
-        filePartsWithKeys.subscribe(tuple -> {
-            FilePart filePart = tuple.getT1();
-            String key = tuple.getT2();
-            log.info("processFilesAndSendRequest Key: " + key);
-            log.info("processFilesAndSendRequest Filename: " + filePart.filename());
-
-            // Add the file part and filename to the body builder
-            bodyBuilder.part(key, filePart).filename(filePart.filename());
-        });
-        log.info("bodyBuilder {}", bodyBuilder);
-        return bodyBuilder;
-    }
-
-
-    @Override
     public Mono<ResponseDTO> makeExternalApiCall(ExternalApiIntegrationDTO externalApiIntegrationDTO) {
         log.info("APICallServiceImpl::makeExternalApiCall");
         WebClient client = WebClient.builder()
@@ -181,8 +87,6 @@ public class APICallServiceImpl implements APICallService {
                         return responseDTO;
                     });
         }
-
-
         return responseMono
                 .doOnSuccess(responseDTO -> {
                     // Process the response body asynchronously
@@ -192,9 +96,7 @@ public class APICallServiceImpl implements APICallService {
                     log.info("token: " + token);
                     saveToRedis(externalApiIntegrationDTO, token, responseDTO);
                     log.info("successfully got response: " + responseDTO);
-                })/*.map(exApiDto -> {
-                    return re;
-                })*/
+                })
                 .doOnError(error -> {
                     // Handle any error that occurred during the request
                     log.error("error occurred while calling external API: " + url);
@@ -222,7 +124,7 @@ public class APICallServiceImpl implements APICallService {
             log.info("cacheData value from user input {}",externalApiIntegrationDTO.getStrictCacheTimeInMinutes());
             monoCacheData = cacheOps.opsForValue().set(key, responseDTO, Duration.ofMinutes(externalApiIntegrationDTO.getStrictCacheTimeInMinutes()));
         } else {
-            log.info("cacheData value from properties {}",cacheDataTtl);
+            log.info("cacheData value from properties in ms {}",cacheDataTtl);
             monoCacheData = cacheOps.opsForValue().set(key, responseDTO, Duration.ofMillis(cacheDataTtl));
         }
         monoCacheData.subscribe();
